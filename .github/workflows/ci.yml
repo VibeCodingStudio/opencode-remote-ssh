@@ -1,0 +1,30 @@
+name: Verify
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:tui
+      - run: npm run test:sdk
+      - name: Native credential store
+        if: runner.os != 'Linux'
+        run: npm run test:vault
+      - name: Linux OpenSSH integration
+        if: runner.os == 'Linux'
+        run: npm run test:integration

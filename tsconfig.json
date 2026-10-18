@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "rewriteRelativeImportExtensions": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+    "types": ["node", "bun"],
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": ["src", "test"]
+}
