@@ -13,5 +13,5 @@ export async function temporary() {
   const base = process.platform === "win32" ? path.join(process.env.LOCALAPPDATA!, "Temp", "opencode") : tmpdir();
   await mkdir(base, { recursive: true });
   const directory = await mkdtemp(path.join(base, "remote-ssh-test-"));
-  return { directory, close: () => rm(directory, { recursive: true, force: true }) };
+  return { directory, close: () => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) };
 }

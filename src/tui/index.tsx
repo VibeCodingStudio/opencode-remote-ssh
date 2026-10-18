@@ -9,7 +9,7 @@ import { passwordDialog } from "./password.tsx";
 export default Plugin.define({
   id: "studio.remote-ssh.tui",
   setup(context) {
-    return createRoot(dispose => {
+    const controls = createRoot(dispose => {
       const api = context.client.rpc(RemoteSsh);
       const rpcOptions = () => ({ location: context.location ?? context.data.location.default() });
       const [view, setView] = createSignal<StateView>({ hosts: [], requests: [] });
@@ -143,10 +143,6 @@ export default Plugin.define({
           await refresh();
         }
       }
-      context.keymap.layer(() => ({ mode: "global", commands: [{
-        id: "remote-ssh.configure", title: "管理 SSH 主机", group: "Remote SSH", palette: true,
-        slash: { name: "ssh" }, run: () => { void run(configure); },
-      }] }));
       context.ui.slot({ append: "sidebar.content", render: props => <box flexDirection="column" gap={1} paddingTop={1}>
         <text fg={context.theme.text.base}>远程 SSH</text>
         <Show when={loadError()}><text fg={context.theme.text.feedback.error.base}>SSH 服务暂不可用</text></Show>
@@ -167,7 +163,19 @@ export default Plugin.define({
       const unsubscribe = api.events.on("updated", () => { void refresh(); });
       // Events are live-only; polling also repairs state after server reconnects.
       const timer = setInterval(() => { void refresh(); }, 2000);
-      return () => { disposed = true; clearInterval(timer); unsubscribe(); dispose(); };
+      return {
+        configure: () => { void run(configure); },
+        dispose: () => { disposed = true; clearInterval(timer); unsubscribe(); dispose(); },
+      };
     });
+    // Register at setup scope so OpenCode can use its captured provider owner.
+    // A detached createRoot would override that fallback with an empty context.
+    try {
+      context.keymap.layer(() => ({ mode: "global", commands: [{
+        id: "remote-ssh.configure", title: "管理 SSH 主机", group: "Remote SSH", palette: true,
+        slash: { name: "ssh" }, run: controls.configure,
+      }] }));
+    } catch (error) { controls.dispose(); throw error; }
+    return controls.dispose;
   },
 });

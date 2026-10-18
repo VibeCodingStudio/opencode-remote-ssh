@@ -16,12 +16,28 @@ const { ensureRuntimePluginSupport } = await import(hostModule("@opentui/solid/s
 ensurePluginRuntime();
 ensureRuntimePluginSupport({ additional: { "@opencode/plugin/tui": { Plugin, PluginContextProvider, usePlugin } }, preserve: provides });
 const { testRender } = await import(hostModule("@opentui/solid/index.bun.js"));
+const { createComponent, createContext, createRoot, getOwner, runWithOwner, useContext } = await import(hostModule("solid-js/dist/server.js"));
 const { default: plugin } = await import(pathToFileURL(entrypoint).href);
 assert.equal(plugin.id, "studio.remote-ssh.tui");
 
 let renderSlot;
 let hasCommand = false;
 const menus = [];
+// OpenCode captures its provider owner and uses caller ?? host.owner when
+// registering a keymap layer. A detached plugin root must not shadow it.
+const KeymapContext = createContext();
+let hostOwner;
+let disposeHost;
+const layers = [];
+createRoot(dispose => {
+  disposeHost = dispose;
+  createComponent(KeymapContext.Provider, {
+    value: true,
+    get children() { hostOwner = getOwner(); return undefined; },
+  });
+});
+assert.ok(hostOwner);
+runWithOwner(hostOwner, () => assert.equal(useContext(KeymapContext), true));
 const context = {
   location: { directory: process.cwd() },
   theme: { text: { base: "#ffffff", muted: "#aaaaaa", feedback: { error: { base: "#ff0000" } } } },
@@ -29,7 +45,14 @@ const context = {
     state: async () => ({ hosts: [{ host: { id: "host", name: "开发服务器" }, status: "connected", directory: "/home/dev/project", home: "/home/dev", current: true, changed: false }], requests: [] }),
     events: { on: () => () => {} },
   }) },
-  keymap: { layer: factory => { hasCommand = factory().commands[0].slash?.name === "ssh"; } },
+  keymap: { layer: factory => {
+    const caller = getOwner();
+    createRoot(dispose => {
+      layers.push(dispose);
+      if (!useContext(KeymapContext)) throw new Error("Keymap.Provider is missing");
+      hasCommand = factory().commands[0].slash?.name === "ssh";
+    }, caller ?? hostOwner);
+  } },
   ui: {
     router: { current: () => ({ type: "session", sessionID: "fixture" }) },
     slot: claim => { renderSlot = claim.render; return () => {}; },
@@ -38,9 +61,11 @@ const context = {
   },
   data: { session: { permission: { list: () => [] } } },
 };
-const cleanup = await plugin.setup(context);
-const ui = await testRender(() => renderSlot({ sessionID: "fixture" }), { width: 60, height: 20 });
+let cleanup;
+let ui;
 try {
+  cleanup = await plugin.setup(context);
+  ui = await testRender(() => renderSlot({ sessionID: "fixture" }), { width: 60, height: 20 });
   const frame = await ui.waitForFrame(value => value.includes("开发服务器"));
   assert.equal(hasCommand, true);
   assert.ok(frame.includes("/home/dev/project"));
@@ -50,4 +75,4 @@ try {
   await ui.waitFor(() => menus.length > 0);
   assert.deepEqual(menus[0], ["设为当前目标", "测试连接", "断开连接"]);
   console.log("Installed TUI entrypoint loaded, rendered, and handled a host click without React.");
-} finally { await cleanup?.(); ui.renderer.destroy(); }
+} finally { await cleanup?.(); ui?.renderer.destroy(); layers.forEach(dispose => dispose()); disposeHost?.(); }

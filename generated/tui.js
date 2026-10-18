@@ -186,7 +186,7 @@ function PasswordInput(props) {
 var tui_default = Plugin.define({
   id: "studio.remote-ssh.tui",
   setup(context) {
-    return createRoot((dispose) => {
+    const controls = createRoot((dispose) => {
       const api = context.client.rpc(RemoteSsh);
       const rpcOptions = () => ({
         location: context.location ?? context.data.location.default()
@@ -538,21 +538,6 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
           await refresh();
         }
       }
-      context.keymap.layer(() => ({
-        mode: "global",
-        commands: [{
-          id: "remote-ssh.configure",
-          title: "\u7BA1\u7406 SSH \u4E3B\u673A",
-          group: "Remote SSH",
-          palette: true,
-          slash: {
-            name: "ssh"
-          },
-          run: () => {
-            run(configure);
-          }
-        }]
-      }));
       context.ui.slot({
         append: "sidebar.content",
         render: (props) => (() => {
@@ -660,13 +645,37 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
       const timer = setInterval(() => {
         refresh();
       }, 2000);
-      return () => {
-        disposed = true;
-        clearInterval(timer);
-        unsubscribe();
-        dispose();
+      return {
+        configure: () => {
+          run(configure);
+        },
+        dispose: () => {
+          disposed = true;
+          clearInterval(timer);
+          unsubscribe();
+          dispose();
+        }
       };
     });
+    try {
+      context.keymap.layer(() => ({
+        mode: "global",
+        commands: [{
+          id: "remote-ssh.configure",
+          title: "\u7BA1\u7406 SSH \u4E3B\u673A",
+          group: "Remote SSH",
+          palette: true,
+          slash: {
+            name: "ssh"
+          },
+          run: controls.configure
+        }]
+      }));
+    } catch (error2) {
+      controls.dispose();
+      throw error2;
+    }
+    return controls.dispose;
   }
 });
 export {

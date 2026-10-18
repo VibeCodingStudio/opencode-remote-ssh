@@ -23,6 +23,7 @@ jobs:
       - run: npm run test:install
       - run: npm run test:tui
       - run: npm run test:tui-package
+      - run: npm run test:native-tui
       - name: Verify generated TUI is current
         run: git diff --exit-code -- generated/tui.js
       - run: npm run test:sdk
