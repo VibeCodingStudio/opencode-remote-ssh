@@ -6,7 +6,7 @@
 
 ## 安装
 
-要求 OpenCode **2.0.32 或兼容的 2.x 版本**。当前仓库为私有仓库，Git 安装需要已有的 GitHub 访问权限。
+要求 OpenCode **2.0.32 或兼容的 2.x 版本**。支持直接从公开 GitHub 仓库安装。
 
 ```sh
 opencode plugin add github:VibeCodingStudio/opencode-remote-ssh
@@ -131,7 +131,7 @@ npm run test:integration
 ```
 
 - `check`：类型检查、配置/凭据/权限测试、构建。
-- `test:install`：打包后在全新消费项目中解析生产依赖，验证实际分发时的依赖兼容性。
+- `test:install`：验证 Git 源码包无需安装时构建，并在全新消费项目中解析打包后的生产依赖。
 - `test:tui`：真实 OpenTUI 测试渲染器，验证掩码输入、Unicode 粘贴退格、侧栏显示和鼠标菜单。
 - `test:sdk`：使用 OpenCode 2.0.32 原生 SDK 验证插件加载、14 个工具注册和 RPC，不调用模型。
 - `test:vault`：在 Windows / macOS 使用随机测试凭据验证系统存储，完成后删除测试条目。
