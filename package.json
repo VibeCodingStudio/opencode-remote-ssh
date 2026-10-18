@@ -1,6 +1,6 @@
 {
   "name": "@vibecodingstudio/opencode-remote-ssh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session-scoped SSH tools and host management for OpenCode 2 TUI",
   "type": "module",
   "main": "./src/index.ts",
@@ -21,6 +21,7 @@
     "test:tui": "bun test --preload @opentui/solid/preload test/tui.test.tsx",
     "test:sdk": "bun test/run-sdk.ts",
     "test:vault": "bun test/vault-smoke.ts",
+    "test:install": "tsx test/install-package.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "prepack": "npm run build"
   },
@@ -33,8 +34,8 @@
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.0.32",
-    "@opentui/core": ">=0.5.17 <0.6",
-    "@opentui/solid": ">=0.5.17 <0.6",
+    "@opentui/core": ">=0.5.17",
+    "@opentui/solid": ">=0.5.17",
     "solid-js": "^1.9.12"
   },
   "devDependencies": {

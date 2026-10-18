@@ -20,6 +20,7 @@ jobs:
           bun-version: '1.3.10'
       - run: npm ci
       - run: npm run check
+      - run: npm run test:install
       - run: npm run test:tui
       - run: npm run test:sdk
       - name: Native credential store

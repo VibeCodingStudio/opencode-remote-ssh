@@ -123,6 +123,7 @@ opencode plugin add github:VibeCodingStudio/opencode-remote-ssh
 ```sh
 npm ci
 npm run check
+npm run test:install
 npm run test:tui
 npm run test:sdk
 npm run test:vault
@@ -130,6 +131,7 @@ npm run test:integration
 ```
 
 - `check`：类型检查、配置/凭据/权限测试、构建。
+- `test:install`：打包后在全新消费项目中解析生产依赖，验证实际分发时的依赖兼容性。
 - `test:tui`：真实 OpenTUI 测试渲染器，验证掩码输入、Unicode 粘贴退格、侧栏显示和鼠标菜单。
 - `test:sdk`：使用 OpenCode 2.0.32 原生 SDK 验证插件加载、14 个工具注册和 RPC，不调用模型。
 - `test:vault`：在 Windows / macOS 使用随机测试凭据验证系统存储，完成后删除测试条目。
