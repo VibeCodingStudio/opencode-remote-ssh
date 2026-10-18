@@ -125,6 +125,7 @@ npm ci
 npm run check
 npm run test:install
 npm run test:tui
+npm run test:tui-package
 npm run test:sdk
 npm run test:vault
 npm run test:integration
@@ -133,8 +134,11 @@ npm run test:integration
 - `check`：类型检查、配置/凭据/权限测试、构建。
 - `test:install`：验证 Git 源码包无需安装时构建，并在全新消费项目中解析打包后的生产依赖。
 - `test:tui`：真实 OpenTUI 测试渲染器，验证掩码输入、Unicode 粘贴退格、侧栏显示和鼠标菜单。
+- `test:tui-package`：将发布包解压到独立的 `node_modules`，使用宿主同款加载器验证入口加载、侧栏渲染和点击菜单。
 - `test:sdk`：使用 OpenCode 2.0.32 原生 SDK 验证插件加载、14 个工具注册和 RPC，不调用模型。
 - `test:vault`：在 Windows / macOS 使用随机测试凭据验证系统存储，完成后删除测试条目。
 - `test:integration`：需要正在运行的 Docker。创建临时 Linux OpenSSH 主机、跳板及禁用 SFTP 的主机，验证密码/密钥认证、文件传输、目录操作、目标隔离、取消和断线行为；结束后清理容器和临时凭据。
 
 参考：[需求基线](docs/requirements.md)、[领域术语](GLOSSARY.md)、[架构决定](docs/adr/0001-remote-tools-and-process-state.md)。
+
+TUI 发布入口是预编译的 `generated/tui.js`。修改 `src/tui` 或它引用的模块后运行 `npm run compile`，并一并提交生成文件；CI 会检查生成产物是否同步。Git 安装直接使用这个文件，安装时无需编译 JSX。

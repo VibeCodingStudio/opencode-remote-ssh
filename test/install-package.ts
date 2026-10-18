@@ -17,6 +17,7 @@ try {
   await mkdir(repository);
   await writeFile(path.join(repository, "package.json"), JSON.stringify(manifest));
   await cp("src", path.join(repository, "src"), { recursive: true });
+  await cp("generated", path.join(repository, "generated"), { recursive: true });
   await exec("git", ["init", "--quiet", repository]);
   await exec("git", ["-C", repository, "add", "."]);
   await exec("git", ["-C", repository, "-c", "user.name=Install fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "Source-only plugin fixture"]);
