@@ -1,6 +1,6 @@
 {
   "name": "@vibecodingstudio/opencode-remote-ssh",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Session-scoped SSH tools and host management for OpenCode 2 TUI",
   "type": "module",
   "main": "./src/index.ts",

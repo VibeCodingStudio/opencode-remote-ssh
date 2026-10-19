@@ -5,6 +5,51 @@ import type { Plugin } from "@opencode/plugin/tui";
 import { passwordDialog } from "../src/tui/password.tsx";
 import plugin from "../src/tui/index.tsx";
 
+async function navigateConfiguration(choices: (string | undefined)[], prompts: (string | undefined)[] = []) {
+  const menus: { title: string; current?: string; options: { value: string }[] }[] = [];
+  const errors: string[] = [];
+  let open: (() => void) | undefined;
+  const finished = Promise.withResolvers<void>();
+  const host = { id: "host", name: "fixture", hostname: "example.test", port: 22, username: "dev", auth: "password", remembered: false };
+  const context = {
+    location: { directory: "/fixture" },
+    client: { rpc: () => ({ state: async () => ({ hosts: [{ host }], requests: [] }), events: { on: () => () => {} } }) },
+    keymap: { layer: (factory: () => { commands: { run: () => void }[] }) => { open = factory().commands[0].run; } },
+    ui: {
+      router: { current: () => ({ type: "home" }) }, slot: () => () => {},
+      dialog: {
+        select: async (input: typeof menus[number]) => {
+          menus.push(input);
+          if (!choices.length) { finished.resolve(); return undefined; }
+          return choices.shift();
+        },
+        prompt: async () => prompts.shift(),
+      },
+      toast: { show: (input: { message: string; variant: string }) => { if (input.variant === "error") { errors.push(input.message); finished.resolve(); } } },
+    },
+  } as unknown as Plugin.Context;
+  const cleanup = await plugin.setup(context);
+  try {
+    open!();
+    await finished.promise;
+    expect(errors).toEqual([]);
+    return menus;
+  } finally { await cleanup?.(); }
+}
+
+test("SSH editor restores the selected field after submit, cancel, toggle, and changing authentication", async () => {
+  const menus = await navigateConfiguration(["new", "port", "username", "remember", "auth", "key", "jump", undefined], ["2222", undefined]);
+  const editor = menus.filter(menu => menu.title === "添加 SSH 主机");
+  expect(editor.slice(1).map(menu => menu.current)).toEqual(["port", "username", "remember", "auth", "jump"]);
+  expect(editor.at(-1)?.options.map(option => option.value)).toContain("privateKeyPath");
+});
+
+test("SSH configuration restores the host and its last action when returning from a submenu", async () => {
+  const menus = await navigateConfiguration(["host", undefined, "host", "edit", undefined, "host", undefined]);
+  expect(menus.filter(menu => menu.title === "SSH 主机配置").slice(1).map(menu => menu.current)).toEqual(["host", "host", "host"]);
+  expect(menus.filter(menu => menu.title === "fixture").at(-1)?.current).toBe("edit");
+});
+
 test("password entry masks typing/paste, handles grapheme backspace, and returns only through submit", async () => {
   const [dialog, setDialog] = createSignal<(() => JSX.Element) | undefined>();
   const context = {

@@ -136,7 +136,7 @@ npm run test:integration
 - `test:install`：验证 Git 源码包无需安装时构建，并在全新消费项目中解析打包后的生产依赖。
 - `test:tui`：真实 OpenTUI 测试渲染器，验证掩码输入、Unicode 粘贴退格、侧栏显示和鼠标菜单。
 - `test:tui-package`：将发布包解压到独立的 `node_modules`，使用宿主同款加载器验证入口加载、侧栏渲染和点击菜单。
-- `test:native-tui`：在隔离配置和数据目录中，通过伪终端启动真正的 OpenCode 2 TUI，并验证 `/ssh` 能打开配置对话框；不调用模型。
+- `test:native-tui`：在隔离配置和数据目录中，通过伪终端启动真正的 OpenCode 2 TUI，验证 `/ssh` 能打开配置对话框、从字段输入返回后仍保持原选中项；不调用模型。
 - `test:sdk`：使用 OpenCode 2.0.32 原生 SDK 验证插件加载、14 个工具注册和 RPC，不调用模型。
 - `test:vault`：在 Windows / macOS 使用随机测试凭据验证系统存储，完成后删除测试条目。
 - `test:integration`：需要正在运行的 Docker。创建临时 Linux OpenSSH 主机、跳板及禁用 SFTP 的主机，验证密码/密钥认证、文件传输、目录操作、目标隔离、取消和断线行为；结束后清理容器和临时凭据。

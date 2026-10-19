@@ -85,6 +85,17 @@ function checkFrame() {
   } else if (phase === "autocomplete" && /管理\s*SSH\s*主机/.test(plain)) {
     phase = "configuration"; terminal.write("\r");
   } else if (phase === "configuration" && /SSH\s*主机配置/.test(plain) && /添加主机/.test(plain)) {
+    phase = "editor"; terminal.write("\r");
+  } else if (phase === "editor" && /添加 SSH 主机/.test(plain) && /端口：22/.test(plain)) {
+    phase = "port"; terminal.write("\x1b[B\x1b[B\r");
+  } else if (phase === "port" && /\bport\b/.test(plain) && !/添加 SSH 主机/.test(plain)) {
+    phase = "return-to-editor"; terminal.write("\x1b");
+  } else if (phase === "return-to-editor" && /添加 SSH 主机/.test(plain)) {
+    // Enter without any navigation must reopen the field we just cancelled.
+    phase = "restored-port"; terminal.write("\r");
+  } else if (phase === "restored-port" && /\bname\b/.test(plain) && !/添加 SSH 主机/.test(plain)) {
+    fail(new Error("SSH editor lost the selected port field after returning; Enter opened name instead"));
+  } else if (phase === "restored-port" && /\bport\b/.test(plain) && !/添加 SSH 主机/.test(plain)) {
     done = true; resolveRun();
   }
 }
@@ -94,7 +105,7 @@ let succeeded = false;
 try {
   await result;
   succeeded = true;
-  console.log("Native OpenCode TUI started and /ssh opened its configuration dialog (no model calls).");
+  console.log("Native OpenCode TUI opened /ssh and preserved the selected field after returning (no model calls).");
 } finally {
   clearTimeout(timeout); clearInterval(logCheck); data.dispose(); screen.dispose();
   if (!exited) { try { terminal.kill(); } catch {} }

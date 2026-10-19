@@ -352,10 +352,12 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
           auth: "password"
         };
         let remember = existing?.remembered ?? false;
+        let current;
         try {
           while (!disposed) {
             const selected = await context.ui.dialog.select({
               title: existing ? `\u7F16\u8F91 \xB7 ${draft.name}` : "\u6DFB\u52A0 SSH \u4E3B\u673A",
+              current,
               options: [{
                 title: `\u540D\u79F0\uFF1A${draft.name || "\u672A\u586B\u5199"}`,
                 value: "name"
@@ -390,6 +392,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             });
             if (!selected)
               return;
+            current = selected;
             if (selected === "save") {
               try {
                 await api.save({
@@ -417,6 +420,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             if (selected === "auth") {
               const auth = await context.ui.dialog.select({
                 title: "\u8BA4\u8BC1\u65B9\u5F0F",
+                current: draft.auth,
                 options: [{
                   title: "\u5BC6\u7801",
                   value: "password"
@@ -435,6 +439,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             if (selected === "jump") {
               const jump = await context.ui.dialog.select({
                 title: "\u9009\u62E9\u8DF3\u677F\u673A\uFF08\u53EF\u4EE5\u7EE7\u7EED\u5F15\u7528\u5176\u4ED6\u8DF3\u677F\u673A\uFF09",
+                current: draft.jumpHostId ?? "",
                 options: [{
                   title: "\u65E0\u8DF3\u677F\u673A",
                   value: ""
@@ -481,9 +486,16 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
           });
           return;
         }
+        let current;
+        const actions = new Map;
         while (!disposed) {
+          if (current !== "new" && !view().hosts.some(({
+            host: host2
+          }) => host2.id === current))
+            current = undefined;
           const id = await context.ui.dialog.select({
             title: "SSH \u4E3B\u673A\u914D\u7F6E",
+            current,
             options: [{
               title: "\uFF0B \u6DFB\u52A0\u4E3B\u673A",
               value: "new"
@@ -497,6 +509,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
           });
           if (!id)
             return;
+          current = id;
           if (id === "new") {
             await editor();
             continue;
@@ -506,6 +519,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             continue;
           const action = await context.ui.dialog.select({
             title: host.name,
+            current: actions.get(id),
             options: [{
               title: "\u7F16\u8F91\u914D\u7F6E",
               value: "edit"
@@ -520,6 +534,8 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
               value: "forget-key"
             }]
           });
+          if (action)
+            actions.set(id, action);
           if (action === "edit")
             await editor(host);
           if (action === "test")

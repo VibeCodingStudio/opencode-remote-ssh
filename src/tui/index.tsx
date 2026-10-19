@@ -74,9 +74,10 @@ export default Plugin.define({
           username: existing.username, auth: existing.auth, privateKeyPath: existing.privateKeyPath, jumpHostId: existing.jumpHostId,
         } : { name: "", hostname: "", port: 22, username: "", auth: "password" };
         let remember = existing?.remembered ?? false;
+        let current: string | undefined;
         try {
           while (!disposed) {
-            const selected = await context.ui.dialog.select({ title: existing ? `编辑 · ${draft.name}` : "添加 SSH 主机", options: [
+            const selected = await context.ui.dialog.select({ title: existing ? `编辑 · ${draft.name}` : "添加 SSH 主机", current, options: [
               { title: `名称：${draft.name || "未填写"}`, value: "name" },
               { title: `地址：${draft.hostname || "未填写"}`, value: "hostname" },
               { title: `端口：${draft.port}`, value: "port" },
@@ -89,6 +90,7 @@ export default Plugin.define({
               { title: "保存", value: "save" },
             ] });
             if (!selected) return;
+            current = selected;
             if (selected === "save") {
               try { await api.save({ host: draft, secret, remember }, rpcOptions()); notify("主机配置已保存"); return; }
               catch (error) { notify(message(error), true); continue; }
@@ -96,12 +98,12 @@ export default Plugin.define({
             if (selected === "secret") { const entered = await passwordDialog(context, draft.auth === "password" ? "SSH 密码" : "私钥口令"); if (entered !== undefined) secret = entered; continue; }
             if (selected === "remember") { remember = !remember; continue; }
             if (selected === "auth") {
-              const auth = await context.ui.dialog.select({ title: "认证方式", options: [{ title: "密码", value: "password" as const }, { title: "私钥", value: "key" as const }] });
+              const auth = await context.ui.dialog.select({ title: "认证方式", current: draft.auth, options: [{ title: "密码", value: "password" as const }, { title: "私钥", value: "key" as const }] });
               if (auth) { if (auth !== draft.auth) secret = undefined; draft.auth = auth; }
               continue;
             }
             if (selected === "jump") {
-              const jump = await context.ui.dialog.select({ title: "选择跳板机（可以继续引用其他跳板机）", options: [
+              const jump = await context.ui.dialog.select({ title: "选择跳板机（可以继续引用其他跳板机）", current: draft.jumpHostId ?? "", options: [
                 { title: "无跳板机", value: "" },
                 ...view().hosts.filter(h => h.host.id !== draft.id).map(h => ({ title: h.host.name, value: h.host.id })),
               ] });
@@ -121,19 +123,24 @@ export default Plugin.define({
         if (prompting || editing) return;
         await refresh();
         if (loadError()) { await context.ui.dialog.alert({ title: "SSH 服务不可用", message: `${loadError()}\n请确认服务端已加载插件；必要时重启 OpenCode 服务。` }); return; }
+        let current: string | undefined;
+        const actions = new Map<string, string>();
         while (!disposed) {
-          const id = await context.ui.dialog.select({ title: "SSH 主机配置", options: [
+          if (current !== "new" && !view().hosts.some(({ host }) => host.id === current)) current = undefined;
+          const id = await context.ui.dialog.select({ title: "SSH 主机配置", current, options: [
             { title: "＋ 添加主机", value: "new" },
             ...view().hosts.map(({ host }) => ({ title: host.name, description: `${host.username}@${host.hostname}:${host.port}`, value: host.id })),
           ] });
           if (!id) return;
+          current = id;
           if (id === "new") { await editor(); continue; }
           const host = view().hosts.find(h => h.host.id === id)?.host;
           if (!host) continue;
-          const action = await context.ui.dialog.select({ title: host.name, options: [
+          const action = await context.ui.dialog.select({ title: host.name, current: actions.get(id), options: [
             { title: "编辑配置", value: "edit" }, { title: "测试连接", value: "test" },
             { title: "删除配置", value: "delete" }, { title: "重置信任指纹", value: "forget-key" },
           ] });
+          if (action) actions.set(id, action);
           if (action === "edit") await editor(host);
           if (action === "test") await test(id);
           if (action === "delete" || action === "forget-key") {
