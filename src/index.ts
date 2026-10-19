@@ -24,6 +24,7 @@ export default Plugin.define({
         try {
           if (input.action === "delete") { await remote.deleteHost(input.hostId); return { ok: true }; }
           if (input.action === "forget-key") { await remote.forgetHostKey(input.hostId); return { ok: true }; }
+          if (input.action === "forget-sudo") { await remote.sudoCredentials.remove(input.hostId); return { ok: true }; }
           if (input.action === "test") return json(await remote.test(input.hostId, call.signal));
           if (!input.sessionId) throw new SshError("SESSION_REQUIRED", "Open an OpenCode session first");
           await initializeSession(ctx, remote, input.sessionId);
@@ -33,20 +34,17 @@ export default Plugin.define({
         } catch (error) { return call.error("failure", error instanceof Error ? error.message : "SSH operation failed", { code: error instanceof SshError ? error.code : "SSH_ERROR" }); }
       },
       credential: async (input, call) => {
-        try { await remote.replyCredential(input.requestId, input.value, input.remember); return { ok: true }; }
+        try { await remote.replyCredential(input.requestId, input.value, input.remember, input.reuseSSH); return { ok: true }; }
         catch (error) { return call.error("failure", error instanceof Error ? error.message : "Credential operation failed", { code: "CREDENTIAL_ERROR" }); }
       },
     });
     await registerTools(ctx, remote);
     await ctx.session.hook("context", async event => {
       await initializeSession(ctx, remote, event.sessionID);
-      const target = remote.target(event.sessionID);
       if (readonlyAgent(event.agent)) for (const name of Object.keys(event.tools)) {
         if (name.startsWith("ssh_") && !READ_ONLY.has(name as ToolName)) delete event.tools[name];
       }
-      event.system.push({ type: "text", text: target
-        ? `Remote SSH target for this session: ${JSON.stringify(target)}. Use ssh_* tools for tasks on that host. Native local tools still operate on the local project. ssh_set_workspace changes the remote target/directory; temporary cd in ssh_shell_exec does not. Explicit host on ordinary tools does not change the default. Never request passwords in chat; the TUI credential dialog handles them. Do not automatically replay commands with unknown outcomes.`
-        : "Remote SSH is available through ssh_* tools. No remote target is selected for this session. Use ssh_list_hosts then ssh_set_workspace when the user requests remote work. Never request credentials in chat; the TUI handles credential input." });
+      event.system.push({ type: "text", text: "Remote SSH is available through ssh_* tools. Use ssh_list_hosts to discover host IDs. Every other ssh_* tool requires an explicit hostId; there is no current/default host. Multiple hosts can be used concurrently, with independent session-scoped connections and working directories. ssh_set_workspace changes only the specified host's directory; temporary cd in ssh_shell_exec does not persist. Native local tools still operate on the local project. For root execution use ssh_shell_exec with sudo:true. Never put passwords in commands or stdin or request them in chat; the TUI handles credential input. Do not automatically replay commands with unknown outcomes." });
     });
     const stop = remote.onChange(() => { void rpc.events.emit("updated", {}).catch(() => {}); });
     const release = remote.retain();

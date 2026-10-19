@@ -5,13 +5,15 @@ import { StringDecoder } from "node:string_decoder";
 import { checkAbort, SshError, type HostProfile } from "./domain.ts";
 import { localPath, quote } from "./paths.ts";
 import type { HostKeys } from "./storage.ts";
+import { SudoExchange, type SudoPassword } from "./sudo.ts";
 
 export type CommandResult = {
   stdout: string; stderr: string; exitCode: number | null; signal?: string;
   truncated: boolean; timedOut: boolean; cancelled: boolean;
   outcome: "exited" | "unknown";
+  elevated?: boolean;
 };
-export type ExecOptions = { timeoutMs?: number; stdin?: string; signal?: AbortSignal; maxBytes?: number };
+export type ExecOptions = { timeoutMs?: number; stdin?: string; signal?: AbortSignal; maxBytes?: number; sudo?: SudoPassword };
 
 /** Drains every byte while retaining only a bounded, valid UTF-8 prefix. */
 class Output {
@@ -100,14 +102,30 @@ export class Connection {
       let finished = false, timedOut = false, cancelled = false, exited = false;
       let exitCode: number | null = null, exitSignal: string | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined, grace: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => { clearTimeout(timer); clearTimeout(grace); options.signal?.removeEventListener("abort", abort); this.client.off("close", lost); };
+      const authentication = new AbortController();
+      const cleanup = () => { authentication.abort(); clearTimeout(timer); clearTimeout(grace); options.signal?.removeEventListener("abort", abort); this.client.off("close", lost); };
+      const sudo = options.sudo ? new SudoExchange({
+        password: options.sudo, signal: authentication.signal,
+        write: value => { channel?.write(value); },
+        ready: () => { if (!finished && !cancelled && !timedOut) channel?.end(options.stdin ?? ""); },
+        output: data => stderr.push(data),
+        fail: error => {
+          if (finished || authentication.signal.aborted) return;
+          finished = true; cleanup();
+          try { channel?.end(); channel?.close(); } catch {}
+          reject(error);
+        },
+      }) : undefined;
       const finish = () => {
         if (finished) return;
         finished = true; cleanup();
+        sudo?.flush();
         resolve({ stdout: stdout.text(), stderr: stderr.text(), exitCode, signal: exitSignal,
+          ...(sudo ? { elevated: sudo.authenticated } : {}),
           truncated: stdout.truncated || stderr.truncated, timedOut, cancelled, outcome: exited ? "exited" : "unknown" });
       };
       const stop = () => {
+        authentication.abort();
         try { channel?.signal("TERM"); } catch {}
         grace = setTimeout(() => { try { channel?.signal("KILL"); channel?.close(); } catch {} finish(); }, 1500);
       };
@@ -118,17 +136,17 @@ export class Connection {
       const timeout = options.timeoutMs ?? 120_000;
       if (timeout > 0) timer = setTimeout(() => { if (finished) return; timedOut = true; stop(); }, timeout);
       try {
-        this.client.exec(command, (error, stream) => {
+        this.client.exec(sudo ? sudo.command(command) : command, (error, stream) => {
           if (finished) { stream?.close(); return; }
           if (error) { finished = true; cleanup(); reject(new SshError("EXEC_FAILED", "SSH server refused the command channel")); return; }
           channel = stream;
           stream.on("data", (data: Buffer) => stdout.push(data));
-          stream.stderr.on("data", (data: Buffer) => stderr.push(data));
+          stream.stderr.on("data", (data: Buffer) => sudo ? sudo.push(data) : stderr.push(data));
           stream.on("error", finish);
           stream.on("exit", (code: number | null, signal?: string) => { exited = true; exitCode = typeof code === "number" ? code : null; exitSignal = signal; });
           stream.on("close", finish);
           if (cancelled || timedOut) { try { stream.signal("TERM"); } catch {} }
-          stream.end(options.stdin ?? "");
+          if (!sudo) stream.end(options.stdin ?? "");
         });
       } catch { finished = true; cleanup(); reject(new SshError("EXEC_FAILED", "Could not open SSH command channel")); }
       if (options.signal?.aborted) abort();

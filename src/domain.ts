@@ -21,13 +21,11 @@ export const StoredHost = HostInput.safeExtend({
   id: z.string().uuid(), revision: z.number().int().positive(),
   credentialId: z.string().uuid().optional(), remembered: z.boolean(),
 });
-export type RemoteTarget = { hostId: string; directory: string };
 export type HostStatus = {
   host: HostProfile;
   status: "disconnected" | "connecting" | "connected" | "error";
   directory?: string;
   home?: string;
-  current: boolean;
   changed: boolean;
   sftp?: boolean;
   error?: string;

@@ -22,7 +22,7 @@ test("SSH tools preserve native permission rejection and exclude writes from rea
   const runtime = new RemoteRuntime(temp.directory, new MemoryVault()); await runtime.load();
   const host = await runtime.save({ name: "test", hostname: "localhost", username: "tester", auth: "password" });
   const tools = new Map<string, Info>();
-  let performed = 0, deny: unknown, denyAction: string | undefined;
+  let performed = 0, deny: unknown, denyAction: string | undefined, denyPrefix: string | undefined;
   const checks: { action: string; resources: string[] }[] = [];
   runtime.connection = async () => ({ home: "/home/tester", alive: true,
     exec: async () => { performed++; throw new Error("must not execute when denied"); },
@@ -30,7 +30,7 @@ test("SSH tools preserve native permission rejection and exclude writes from rea
   const ctx = {
     tool: { transform: async (callback: (editor: { add: (tool: Info) => void }) => void) => callback({ add: tool => { tools.set(tool.name, tool); } }) },
     session: { get: async () => ({ location: { directory: temp.directory } }) },
-    permission: { assert: async (input: { action: string; resources: string[] }) => { checks.push(input); if (deny && (!denyAction || input.action === denyAction)) throw deny; } },
+    permission: { assert: async (input: { action: string; resources: string[] }) => { checks.push(input); if (deny && (!denyAction || input.action === denyAction) && (!denyPrefix || input.resources.some(resource => resource.startsWith(denyPrefix!)))) throw deny; } },
   } as unknown as Plugin.Context;
   await registerTools(ctx, runtime);
   assert.equal(tools.size, 14);
@@ -40,9 +40,22 @@ test("SSH tools preserve native permission rejection and exclude writes from rea
     await assert.rejects(tools.get(name)!.execute({}, call("explore")), /read-only/);
   }
   deny = new Error("native permission rejected with feedback");
-  await assert.rejects(tools.get("ssh_shell_exec")!.execute({ host: host.id, command: "echo ok && git push" }, call("build")), error => error === deny);
+  await assert.rejects(tools.get("ssh_shell_exec")!.execute({ hostId: host.id, command: "echo ok && git push" }, call("build")), error => error === deny);
   assert.ok(checks.at(-1)?.resources.includes("git push"));
   assert.equal(performed, 0);
+  denyPrefix = "sudo -u root"; checks.length = 0;
+  await assert.rejects(tools.get("ssh_shell_exec")!.execute({ hostId: host.id, command: "echo ok && git push", sudo: true }, call("build")), error => error === deny);
+  assert.ok(checks[0].resources.includes("git push"));
+  assert.match(checks[1].resources[0], /^sudo -u root -- sh -c /);
+  assert.equal(performed, 0); denyPrefix = undefined;
+  assert.equal(schemas.ssh_shell_exec.parse({ hostId: host.id, command: "pwd" }).sudo, false);
+  assert.equal(schemas.ssh_shell_exec.safeParse({ hostId: host.id, command: "pwd", sudoPassword: "secret" }).success, false);
+  for (const [name, schema] of Object.entries(schemas)) if (name !== "ssh_list_hosts") {
+    assert.equal(Object.keys(schema.shape)[0], "hostId");
+    if (!("hostId" in schema.shape)) throw new Error(`${name} requires hostId`);
+    assert.equal(schema.shape.hostId.safeParse(undefined).success, false);
+    assert.equal(schema.shape.hostId.safeParse(host.name).success, false);
+  }
   deny = undefined; checks.length = 0;
   const list = await tools.get("ssh_list_hosts")!.execute({}, call("explore"));
   assert.ok(!String(list.content).includes("credentialId"));
@@ -51,5 +64,5 @@ test("SSH tools preserve native permission rejection and exclude writes from rea
   deny = nativeError; denyAction = "external_directory";
   const outside = path.resolve(temp.directory, `../${path.basename(temp.directory)}-outside`);
   await writeFile(outside, "fixture"); t.after(() => rm(outside, { force: true }));
-  await assert.rejects(tools.get("ssh_upload_file")!.execute({ host: host.id, localPath: outside, remotePath: "x" }, call("build")), error => error === nativeError);
+  await assert.rejects(tools.get("ssh_upload_file")!.execute({ hostId: host.id, localPath: outside, remotePath: "x" }, call("build")), error => error === nativeError);
 });

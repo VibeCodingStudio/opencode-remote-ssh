@@ -8,6 +8,9 @@ import { RemoteRuntime } from "../src/runtime.ts";
 import { MemoryVault, temporary } from "./helpers.ts";
 import * as files from "../src/files.ts";
 import type { HostProfile } from "../src/domain.ts";
+import type { Plugin } from "@opencode/plugin";
+import type { Info, ToolContext } from "@opencode/plugin/promise/tool";
+import { registerTools } from "../src/tools.ts";
 
 describe("real Linux OpenSSH integration from the local runtime", { skip: process.env.REMOTE_SSH_INTEGRATION !== "1", timeout: 240_000 }, () => {
   let fixture: Awaited<ReturnType<typeof dockerFixture>>, temp: Awaited<ReturnType<typeof temporary>>, runtime: RemoteRuntime, host: HostProfile;
@@ -20,11 +23,11 @@ describe("real Linux OpenSSH integration from the local runtime", { skip: proces
   });
   after(async () => { runtime?.close(); await temp?.close(); await fixture?.close(); });
 
-  it("password login starts at home; failed directory change leaves target unchanged", async () => {
-    const target = await runtime.setWorkspace("a", host.id, undefined, publish("a"));
-    assert.equal(target.directory, "/home/tester");
+  it("password login starts at home; failed directory change preserves this host's directory", async () => {
+    const workspace = await runtime.setWorkspace("a", host.id, undefined, publish("a"));
+    assert.equal(workspace.directory, "/home/tester");
     await assert.rejects(runtime.setWorkspace("a", host.id, "/not-a-directory", publish("a")));
-    assert.equal(runtime.target("a")?.directory, "/home/tester");
+    assert.equal(runtime.resolve("a", host.id).directory, "/home/tester");
   });
   it("key and encrypted-key login work, including a mixed-auth jump chain", async () => {
     const directKey = await runtime.save({ name: "密钥服务器", hostname: "127.0.0.1", port: fixture.target.port, username: "tester", auth: "key", privateKeyPath: fixture.keyPath });
@@ -69,7 +72,7 @@ describe("real Linux OpenSSH integration from the local runtime", { skip: proces
     await assert.rejects(files.remove(connection, "/home/tester/project", false));
     await files.remove(connection, "/home/tester/project", true);
   });
-  it("sessions and child snapshots remain isolated across parent target changes", async () => {
+  it("sessions and child directory snapshots remain isolated across parent directory changes", async () => {
     const connection = await runtime.connection("parent", host.id, true);
     await files.mkdir(connection, "/home/tester/work-a", false);
     await files.mkdir(connection, "/home/tester/work-b", false);
@@ -77,13 +80,41 @@ describe("real Linux OpenSSH integration from the local runtime", { skip: proces
     const inherited = tokens.get("parent");
     await runtime.setWorkspace("parent", host.id, "/home/tester/work-b", publish("parent"));
     runtime.session("child", inherited);
-    assert.equal(runtime.target("child")?.directory, "/home/tester/work-a");
+    assert.equal(runtime.resolve("child", host.id).directory, "/home/tester/work-a");
     await runtime.setWorkspace("child", host.id, undefined, publish("child"));
     await runtime.disconnect("parent", host.id, publish("parent"));
     await assert.rejects(runtime.connection("parent", host.id, false), /explicitly disconnected/);
     assert.equal((await (await runtime.connection("child", host.id, false)).exec("printf child")).stdout, "child");
     await runtime.setWorkspace("parent", host.id, undefined, publish("parent"));
-    assert.equal(runtime.target("parent")?.directory, "/home/tester");
+    assert.equal(runtime.resolve("parent", host.id).directory, "/home/tester");
+  });
+  it("explicit host IDs support concurrent tools and independent per-host directories without a current target", async () => {
+    const second = await runtime.save({ name: "并行主机", hostname: "127.0.0.1", port: fixture.jump.port, username: "tester", auth: "password" }, "fixture-password", false);
+    const connections = await Promise.all([host, second].map(h => runtime.connection("multiple", h.id, true)));
+    await Promise.all(connections.map((connection, index) => connection.exec(`mkdir -p /home/tester/multi-${index}`)));
+    await Promise.all([host, second].map((h, index) => runtime.setWorkspace("multiple", h.id, `/home/tester/multi-${index}`, publish("multiple"))));
+    runtime.session("multiple-child", tokens.get("multiple"));
+    assert.equal(runtime.resolve("multiple-child", host.id).directory, "/home/tester/multi-0");
+    assert.equal(runtime.resolve("multiple-child", second.id).directory, "/home/tester/multi-1");
+    const tools = new Map<string, Info>();
+    const context = {
+      tool: { transform: async (callback: (editor: { add: (tool: Info) => void }) => void) => callback({ add: tool => { tools.set(tool.name, tool); } }) },
+      session: { get: async () => ({ location: { directory: temp.directory } }) },
+      permission: { assert: async () => {} },
+    } as unknown as Plugin.Context;
+    await registerTools(context, runtime);
+    const call = { sessionID: "multiple", agent: "build", id: "call", messageID: "message", signal: new AbortController().signal, progress: async () => {} } as unknown as ToolContext;
+    const exec = async (hostId: string) => JSON.parse(String((await tools.get("ssh_shell_exec")!.execute({ hostId, command: "pwd" }, call)).content));
+    const [a, b] = await Promise.all([exec(host.id), exec(second.id)]);
+    assert.equal(a.hostId, host.id); assert.equal(a.stdout, "/home/tester/multi-0\n");
+    assert.equal(b.hostId, second.id); assert.equal(b.stdout, "/home/tester/multi-1\n");
+    await runtime.setWorkspace("multiple", host.id, "/home/tester", publish("multiple"));
+    assert.equal((await exec(second.id)).stdout, "/home/tester/multi-1\n");
+    await runtime.disconnect("multiple", host.id, publish("multiple"));
+    assert.equal((await exec(second.id)).ok, true);
+    assert.equal((await exec(host.id)).code, "MANUALLY_DISCONNECTED");
+    assert.equal("target" in runtime.state("multiple"), false);
+    assert.ok(runtime.state("multiple").hosts.every(h => !("current" in h)));
   });
   it("timeouts and cancellation settle, do not replay commands and leave the transport usable", async () => {
     const connection = await runtime.connection("execution", host.id, true);
@@ -95,6 +126,32 @@ describe("real Linux OpenSSH integration from the local runtime", { skip: proces
     setTimeout(() => controller.abort(), 100);
     assert.equal((await pending).cancelled, true);
     assert.equal((await connection.exec("printf alive")).stdout, "alive");
+  });
+  it("sudo authenticates once, separates stdin, elevates pipelines/redirection and never replays failures", async () => {
+    const connection = await runtime.connection("sudo", host.id, true);
+    let prompts = 0;
+    const sudo = async () => { prompts++; return "fixture-password"; };
+    const result = await connection.exec("cd /home/tester && cat > sudo-input; id -u | cat; cat sudo-input; pwd; printf diagnostic >&2", { sudo, stdin: "payload\n", timeoutMs: 15_000 });
+    assert.equal(result.exitCode, 0); assert.equal(result.elevated, true);
+    assert.equal(result.stdout, "0\npayload\n/home/tester\n");
+    assert.ok(result.stderr.endsWith("diagnostic")); assert.equal(prompts, 1);
+    assert.ok(!result.stderr.includes("remote-ssh-sudo-") && !result.stderr.includes("remote-ssh-root-") && !result.stderr.includes("fixture-password"));
+    assert.equal((await connection.exec("stat -c %U /home/tester/sudo-input")).stdout.trim(), "root");
+    const failed = await connection.exec("printf once >> /home/tester/sudo-once; exit 7", { sudo });
+    assert.equal(failed.exitCode, 7); assert.equal(failed.elevated, true);
+    assert.equal((await connection.exec("cat /home/tester/sudo-once")).stdout, "once");
+    let attempts = 0;
+    const corrected = await connection.exec("printf corrected", { sudo: async (_signal, retry) => { assert.equal(retry, attempts > 0); return ++attempts === 1 ? "wrong" : "fixture-password"; } });
+    assert.equal(corrected.stdout, "corrected"); assert.equal(attempts, 2);
+    const timeout = await connection.exec("printf once >> /home/tester/sudo-timeout; sleep 10", { sudo, timeoutMs: 1000 });
+    assert.equal(timeout.timedOut, true);
+    assert.equal((await connection.exec("cat /home/tester/sudo-timeout")).stdout, "once");
+    const blocked = await connection.exec("printf must-not-run", { timeoutMs: 100, sudo: signal => new Promise(resolve => signal.addEventListener("abort", () => resolve(undefined), { once: true })) });
+    assert.equal(blocked.timedOut, true); assert.equal(blocked.elevated, false); assert.equal(blocked.stdout, "");
+    const nopass = await runtime.save({ name: "免密 sudo", hostname: "127.0.0.1", port: fixture.target.port, username: "nopass", auth: "password" }, "fixture-password", false);
+    const privileged = await runtime.connection("sudo-nopass", nopass.id, true);
+    const noPrompt = await privileged.exec("id -u; cat", { sudo: async () => { throw new Error("NOPASSWD must not request a password"); }, stdin: "input" });
+    assert.equal(noPrompt.exitCode, 0); assert.equal(noPrompt.stdout, "0\ninput"); assert.equal(noPrompt.elevated, true);
   });
   it("SFTP absence does not disable SSH command execution", async () => {
     const noSftp = await runtime.save({ name: "无 SFTP", hostname: "127.0.0.1", port: fixture.noSftp.port, username: "tester", auth: "password" }, "fixture-password", false);
@@ -120,16 +177,16 @@ describe("real Linux OpenSSH integration from the local runtime", { skip: proces
     connection.close();
     const recovered = await runtime.connection("recovery", host.id, false);
     assert.notEqual(recovered, connection);
-    assert.equal(runtime.target("recovery")?.directory, "/home/tester/work-a");
+    assert.equal(runtime.resolve("recovery", host.id).directory, "/home/tester/work-a");
     assert.equal((await recovered.exec("printf recovered")).stdout, "recovered");
     await runtime.reset("recovery", host.id);
-    assert.equal(runtime.target("recovery")?.directory, "/home/tester/work-a");
+    assert.equal(runtime.resolve("recovery", host.id).directory, "/home/tester/work-a");
   });
-  it("restarting runtime forgets targets and temporary credentials without automatic connections", async () => {
+  it("restarting runtime forgets directories and temporary credentials without automatic connections", async () => {
     const reloaded = new RemoteRuntime(temp.directory, new MemoryVault()); await reloaded.load();
     try {
       reloaded.session("child", tokens.get("child"));
-      assert.equal(reloaded.target("child"), undefined);
+      assert.equal(reloaded.resolve("child", host.id).directory, undefined);
       assert.ok(reloaded.state("child").hosts.every(h => h.status === "disconnected"));
       assert.equal(await reloaded.credentials.get(host.credentialId, false), undefined);
     } finally { reloaded.close(); }

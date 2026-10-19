@@ -3,25 +3,27 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Profiles, HostKeys } from "./storage.ts";
 import { Credentials, SystemSecrets, type SecretBackend } from "./credentials.ts";
-import { Connector, type Connection } from "./transport.ts";
-import { Serial, SshError, checkAbort, type HostDraft, type HostProfile, type HostStatus, type RemoteTarget } from "./domain.ts";
+import { Connector, type Connection, type ExecOptions } from "./transport.ts";
+import { SudoCredentials, sudoIdentity } from "./sudo.ts";
+import { Serial, SshError, checkAbort, type HostDraft, type HostProfile, type HostStatus } from "./domain.ts";
 import { remotePath, dataDirectory } from "./paths.ts";
 
-export const SNAPSHOT_KEY = "studio.remote-ssh.snapshot";
-export type CredentialRequest = { id: string; hostId: string; hostName: string; kind: "password" | "passphrase"; sessionId: string };
-type Pending = CredentialRequest & { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+export const SNAPSHOT_KEY = "studio.remote-ssh.directories";
+export type CredentialRequest = { id: string; hostId: string; hostName: string; kind: "password" | "passphrase" | "sudo"; sessionId: string; canReuseSSH?: boolean; retry?: boolean };
+type Pending = CredentialRequest & { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; reply?: (value: string | undefined, remember: boolean, reuseSSH: boolean) => Promise<void> };
 type Slot = { chain: HostProfile[]; connection?: Connection; pending?: Promise<Connection>; controller: AbortController; status: HostStatus["status"]; error?: string };
-type SessionState = { target?: RemoteTarget; directories: Map<string, string>; blocked: Set<string>; slots: Map<string, Slot>; serial: Serial };
-export type StateView = { hosts: HostStatus[]; target?: RemoteTarget; requests: CredentialRequest[] };
+type SessionState = { directories: Map<string, string>; blocked: Set<string>; slots: Map<string, Slot>; serial: Serial; hostLocks: Map<string, Serial> };
+export type StateView = { hosts: HostStatus[]; requests: CredentialRequest[] };
 export type SnapshotPublisher = (token: string) => Promise<void>;
 
 export class RemoteRuntime {
   readonly profiles: Profiles;
   readonly keys: HostKeys;
   readonly credentials: Credentials;
+  readonly sudoCredentials: SudoCredentials;
   private readonly connector: Connector;
   private readonly sessions = new Map<string, SessionState>();
-  private readonly snapshots = new Map<string, RemoteTarget | undefined>();
+  private readonly snapshots = new Map<string, Map<string, string>>();
   private readonly requests = new Map<string, Pending>();
   private readonly events = new EventEmitter();
   private readonly deleting = new Set<string>();
@@ -33,10 +35,11 @@ export class RemoteRuntime {
     this.profiles = new Profiles(path.join(directory, "hosts.json"));
     this.keys = new HostKeys(path.join(directory, "known-hosts.json"));
     this.credentials = new Credentials(secrets ?? new SystemSecrets(path.join(directory, "credentials")));
+    this.sudoCredentials = new SudoCredentials(path.join(directory, "sudo-credentials.json"), this.credentials);
     this.connector = connector ?? new Connector(this.keys);
     this.events.setMaxListeners(0);
   }
-  async load() { await Promise.all([this.profiles.load(), this.keys.load()]); }
+  async load() { await Promise.all([this.profiles.load(), this.keys.load(), this.sudoCredentials.load()]); }
   retain() {
     this.owners++; clearTimeout(this.idleCleanup);
     let released = false;
@@ -61,17 +64,15 @@ export class RemoteRuntime {
     let state = this.sessions.get(id);
     if (!state) {
       const snapshot = typeof snapshotToken === "string" ? this.snapshots.get(snapshotToken) : undefined;
-      state = { target: snapshot ? { ...snapshot } : undefined, directories: new Map(), blocked: new Set(), slots: new Map(), serial: new Serial() };
-      if (snapshot) state.directories.set(snapshot.hostId, snapshot.directory);
+      state = { directories: new Map(snapshot), blocked: new Set(), slots: new Map(), serial: new Serial(), hostLocks: new Map() };
       this.sessions.set(id, state);
     }
     return state;
   }
-  target(id: string) { const target = this.session(id).target; return target ? { ...target } : undefined; }
-  resolve(id: string, selector?: string): { host: HostProfile; directory?: string } {
+  resolve(id: string, hostId: string): { host: HostProfile; directory?: string } {
     const state = this.session(id);
-    if (!selector && !state.target) throw new SshError("NO_TARGET", "No remote target selected; use ssh_list_hosts then ssh_set_workspace");
-    const host = this.profiles.get(selector ?? state.target?.hostId ?? "");
+    const host = this.profiles.get(hostId);
+    if (host.id !== hostId) throw new SshError("HOST_NOT_FOUND", "Use the hostId returned by ssh_list_hosts");
     return { host, directory: state.directories.get(host.id) };
   }
   state(id?: string): StateView {
@@ -83,10 +84,9 @@ export class RemoteRuntime {
           try { return this.profiles.get(snapshot.id).revision !== snapshot.revision; } catch { return true; }
         });
         return { host, status: slot?.status ?? "disconnected", directory: session?.directories.get(host.id), home: slot?.connection?.home,
-          current: session?.target?.hostId === host.id, changed, sftp: slot?.connection?.sftpAvailable, error: slot?.error };
+          changed, sftp: slot?.connection?.sftpAvailable, error: slot?.error };
       }),
-      target: session?.target ? { ...session.target } : undefined,
-      requests: [...this.requests.values()].map(({ id, hostId, hostName, kind, sessionId }) => ({ id, hostId, hostName, kind, sessionId })),
+      requests: [...this.requests.values()].map(({ id, hostId, hostName, kind, sessionId, canReuseSSH, retry }) => ({ id, hostId, hostName, kind, sessionId, canReuseSSH, retry })),
     };
   }
   private used(id: string) {
@@ -128,11 +128,11 @@ export class RemoteRuntime {
       try {
         await this.profiles.remove(id);
         await this.credentials.remove(host.credentialId, host.remembered);
+        await this.sudoCredentials.remove(id);
         for (const state of this.sessions.values()) {
-          if (state.target?.hostId === id) state.target = undefined;
           state.directories.delete(id); state.slots.delete(id); state.blocked.delete(id);
         }
-        for (const [token, target] of this.snapshots) if (target?.hostId === id) this.snapshots.delete(token);
+        for (const directories of this.snapshots.values()) directories.delete(id);
         this.changed();
       } finally { this.deleting.delete(id); }
     });
@@ -163,9 +163,11 @@ export class RemoteRuntime {
     }
     return value;
   }
-  async replyCredential(id: string, value?: string, remember = false) {
+  async replyCredential(id: string, value?: string, remember = false, reuseSSH = false) {
     const request = this.requests.get(id);
     if (!request) return;
+    if (request.reply) { await request.reply(value, remember, reuseSSH); return; }
+    if (reuseSSH) throw new SshError("INVALID_CREDENTIAL", "SSH credential reuse is only available for sudo requests");
     if (value === undefined) {
       clearTimeout(request.timer); this.requests.delete(id); request.reject(new SshError("CREDENTIAL_CANCELLED", "Credential input cancelled")); this.changed(); return;
     }
@@ -173,6 +175,66 @@ export class RemoteRuntime {
     const { revision: _revision, credentialId: _credential, remembered: _remembered, ...draft } = host;
     await this.save(draft, value, remember);
     clearTimeout(request.timer); this.requests.delete(id); request.resolve(); this.changed();
+  }
+  async execSudo(sessionId: string, connection: Connection, command: string, options: ExecOptions) {
+    const host = connection.chain.at(-1)!;
+    const identity = sudoIdentity(connection.chain);
+    const validate = () => {
+      if (sudoIdentity(this.profiles.chain(host.id)) !== identity) throw new SshError("HOST_CHANGED", "Reconnect this host before using sudo after configuration changes");
+    };
+    validate();
+    let authenticated = false;
+    try {
+      const result = await connection.exec(command, { ...options, sudo: async (signal, retry) => {
+        validate(); checkAbort(signal);
+        if (retry) await this.sudoCredentials.remove(host.id, identity);
+        const cached = await this.sudoCredentials.get(host.id, identity);
+        checkAbort(signal);
+        if (cached !== undefined) return cached;
+        const current = this.profiles.get(host.id);
+        const canReuseSSH = !retry && current.auth === "password" && await this.credentials.get(current.credentialId, current.remembered) !== undefined;
+        checkAbort(signal);
+        await new Promise<void>((resolve, reject) => {
+          const id = randomUUID();
+          const finish = (error?: Error) => {
+            const pending = this.requests.get(id);
+            if (!pending) return;
+            clearTimeout(pending.timer); signal.removeEventListener("abort", abort);
+            this.requests.delete(id); this.changed(); error ? reject(error) : resolve();
+          };
+          const abort = () => finish(new SshError("CANCELLED", "Sudo credential input cancelled"));
+          const timer = setTimeout(() => finish(new SshError("CREDENTIAL_REQUIRED", "Enter the sudo password in the TUI and retry")), 120_000);
+          this.requests.set(id, {
+            id, hostId: host.id, hostName: host.name, kind: "sudo", sessionId, canReuseSSH, retry, timer,
+            resolve: () => finish(), reject: error => finish(error),
+            reply: async (value, remember, reuseSSH) => {
+              if (value === undefined && !reuseSSH) { finish(new SshError("CREDENTIAL_CANCELLED", "Sudo credential input cancelled")); return; }
+              validate(); checkAbort(signal);
+              if (reuseSSH) {
+                if (!canReuseSSH) throw new SshError("INVALID_CREDENTIAL", "SSH password reuse is unavailable");
+                const current = this.profiles.get(host.id);
+                value = await this.credentials.get(current.credentialId, current.remembered);
+                if (value === undefined) throw new SshError("CREDENTIAL_REQUIRED", "SSH password is no longer available");
+              }
+              if (value === undefined) { finish(new SshError("CREDENTIAL_CANCELLED", "Sudo credential input cancelled")); return; }
+              if (/[\r\n\0]/.test(value)) throw new SshError("INVALID_CREDENTIAL", "Sudo passwords must not contain newline or NUL characters");
+              checkAbort(signal);
+              await this.sudoCredentials.set(host.id, identity, value, remember);
+              if (signal.aborted) { await this.sudoCredentials.remove(host.id, identity); checkAbort(signal); }
+              finish();
+            },
+          });
+          signal.addEventListener("abort", abort, { once: true }); this.changed();
+          if (signal.aborted) abort();
+        });
+        checkAbort(signal); validate();
+        return this.sudoCredentials.get(host.id, identity);
+      } });
+      authenticated = result.elevated === true;
+      return result;
+    } finally {
+      if (!authenticated) await this.sudoCredentials.remove(host.id, identity);
+    }
   }
   async connection(id: string, hostId: string, explicit: boolean, signal?: AbortSignal): Promise<Connection> {
     const state = this.session(id);
@@ -211,30 +273,39 @@ export class RemoteRuntime {
     slot.pending = pending;
     return pending;
   }
-  private async commit(state: SessionState, target: RemoteTarget | undefined, publish: SnapshotPublisher) {
-    const token = randomUUID();
-    this.snapshots.set(token, target ? { ...target } : undefined);
-    try { await publish(token); }
-    catch (error) { this.snapshots.delete(token); throw error; }
-    state.target = target; this.changed();
+  private hostLock(state: SessionState, hostId: string) {
+    let lock = state.hostLocks.get(hostId);
+    if (!lock) { lock = new Serial(); state.hostLocks.set(hostId, lock); }
+    return lock;
   }
-  async setWorkspace(id: string, selector: string | undefined, directory: string | undefined, publish: SnapshotPublisher, signal?: AbortSignal) {
+  private async commit(state: SessionState, hostId: string, directory: string | undefined, publish: SnapshotPublisher) {
+    await state.serial.run(async () => {
+      const directories = new Map(state.directories), token = randomUUID();
+      if (directory === undefined) directories.delete(hostId); else directories.set(hostId, directory);
+      this.snapshots.set(token, directories);
+      try { await publish(token); }
+      catch (error) { this.snapshots.delete(token); throw error; }
+      // Other hosts may have opened a connection while publishing this snapshot.
+      if (directory === undefined) state.directories.delete(hostId); else state.directories.set(hostId, directory);
+      this.changed();
+    });
+  }
+  async setWorkspace(id: string, hostId: string, directory: string | undefined, publish: SnapshotPublisher, signal?: AbortSignal) {
     const state = this.session(id);
-    return state.serial.run(async () => {
-      const { host } = this.resolve(id, selector);
+    return this.hostLock(state, hostId).run(async () => {
+      const { host } = this.resolve(id, hostId);
       const connection = await this.connection(id, host.id, true, signal);
       const next = remotePath(directory, state.directories.get(host.id) ?? connection.home, connection.home);
       const resolved = await connection.directory(next, signal);
       checkAbort(signal);
-      await this.commit(state, { hostId: host.id, directory: resolved }, publish);
-      state.directories.set(host.id, resolved); this.changed();
+      await this.commit(state, host.id, resolved, publish);
       return { hostId: host.id, hostName: host.name, directory: resolved };
     });
   }
   async disconnect(id: string, hostId: string, publish: SnapshotPublisher) {
     const state = this.session(id);
-    return state.serial.run(async () => {
-      if (state.target?.hostId === hostId) await this.commit(state, undefined, publish);
+    return this.hostLock(state, hostId).run(async () => {
+      await this.commit(state, hostId, undefined, publish);
       state.blocked.add(hostId);
       const slot = state.slots.get(hostId);
       slot?.controller.abort(); slot?.connection?.close();
@@ -257,6 +328,10 @@ export class RemoteRuntime {
     } finally { this.release(id); }
   }
   release(id: string) {
+    for (const request of [...this.requests.values()]) if (request.sessionId === id) {
+      request.reject(new SshError("CANCELLED", "Session closed"));
+      clearTimeout(request.timer); this.requests.delete(request.id);
+    }
     const state = this.sessions.get(id);
     if (!state) return;
     for (const slot of state.slots.values()) { slot.controller.abort(); slot.connection?.close(); }
@@ -265,7 +340,8 @@ export class RemoteRuntime {
   close() { clearTimeout(this.idleCleanup); for (const id of this.sessions.keys()) this.release(id); this.snapshots.clear(); }
 }
 
-const SINGLETON = Symbol.for("studio.opencode-remote-ssh.runtime.v1");
+// The explicit-host model must not reuse a legacy runtime with a current target.
+const SINGLETON = Symbol.for("studio.opencode-remote-ssh.runtime.v2");
 export function runtime(): Promise<RemoteRuntime> {
   const globals = globalThis as typeof globalThis & { [SINGLETON]?: Promise<RemoteRuntime> };
   return globals[SINGLETON] ??= (async () => { const result = new RemoteRuntime(dataDirectory()); await result.load(); return result; })().catch(error => { delete globals[SINGLETON]; throw error; });

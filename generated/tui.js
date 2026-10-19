@@ -58,8 +58,8 @@ var RemoteSsh = Rpc.define({
   methods: {
     state: { input: z2.object({ sessionId: z2.string().optional() }), output: z2.unknown(), errors: error },
     save: { input: z2.object({ host: HostInput, secret: z2.string().max(16384).optional(), remember: z2.boolean().optional() }), output: z2.unknown(), errors: error },
-    manage: { input: z2.object({ action: z2.enum(["connect", "disconnect", "test", "delete", "forget-key"]), hostId: z2.string(), sessionId: z2.string().optional() }), output: z2.unknown(), errors: error },
-    credential: { input: z2.object({ requestId: z2.string(), value: z2.string().max(16384).optional(), remember: z2.boolean().default(false) }), output: z2.unknown(), errors: error }
+    manage: { input: z2.object({ action: z2.enum(["connect", "disconnect", "test", "delete", "forget-key", "forget-sudo"]), hostId: z2.string(), sessionId: z2.string().optional() }), output: z2.unknown(), errors: error },
+    credential: { input: z2.object({ requestId: z2.string(), value: z2.string().max(16384).optional(), remember: z2.boolean().default(false), reuseSSH: z2.boolean().default(false) }), output: z2.unknown(), errors: error }
   },
   events: { updated: { schema: z2.object({}) } }
 });
@@ -198,6 +198,7 @@ var tui_default = Plugin.define({
       const [viewSession, setViewSession] = createSignal2();
       const [loadError, setLoadError] = createSignal2();
       let requestSequence = 0, disposed = false, editing = false, prompting = false;
+      let promptRequest;
       const activeSession = () => {
         const route = context.ui.router.current();
         return route.type === "session" ? route.sessionID : undefined;
@@ -219,6 +220,8 @@ var tui_default = Plugin.define({
           setView(state);
           setViewSession(sessionId);
           setLoadError(undefined);
+          if (prompting && promptRequest && !state.requests.some((request) => request.id === promptRequest))
+            context.ui.dialog.clear();
           promptCredentials();
         } catch (error2) {
           if (!disposed && sequence === requestSequence)
@@ -244,9 +247,32 @@ var tui_default = Plugin.define({
         if (context.data.session.permission.list(request.sessionId)?.length)
           return;
         prompting = true;
+        promptRequest = request.id;
         try {
-          const value = await passwordDialog(context, `${request.hostName} \xB7 ${request.kind === "password" ? "SSH \u5BC6\u7801" : "\u79C1\u94A5\u53E3\u4EE4"}`);
-          if (value === undefined) {
+          let reuseSSH = false;
+          if (request.kind === "sudo" && request.canReuseSSH) {
+            const source = await context.ui.dialog.select({
+              title: `${request.hostName} \xB7 sudo \u5BC6\u7801`,
+              options: [{
+                title: "\u4F7F\u7528\u6B64\u4E3B\u673A\u7684 SSH \u5BC6\u7801",
+                value: "ssh"
+              }, {
+                title: "\u8F93\u5165\u72EC\u7ACB\u7684 sudo \u5BC6\u7801",
+                value: "manual"
+              }]
+            });
+            if (!source) {
+              await api.credential({
+                requestId: request.id,
+                remember: false
+              }, rpcOptions());
+              return;
+            }
+            reuseSSH = source === "ssh";
+          }
+          const label = request.kind === "sudo" ? `sudo \u5BC6\u7801${request.retry ? "\uFF08\u4E0A\u6B21\u8BA4\u8BC1\u5931\u8D25\uFF09" : ""}` : request.kind === "password" ? "SSH \u5BC6\u7801" : "\u79C1\u94A5\u53E3\u4EE4";
+          const value = reuseSSH ? undefined : await passwordDialog(context, `${request.hostName} \xB7 ${label}`);
+          if (value === undefined && !reuseSSH) {
             await api.credential({
               requestId: request.id,
               remember: false
@@ -265,6 +291,7 @@ var tui_default = Plugin.define({
             await api.credential({
               requestId: request.id,
               value,
+              reuseSSH,
               remember: remember === true
             }, rpcOptions());
           } catch (error2) {
@@ -280,6 +307,7 @@ var tui_default = Plugin.define({
             await api.credential({
               requestId: request.id,
               value: temporary ? value : undefined,
+              reuseSSH: temporary === true && reuseSSH,
               remember: false
             }, rpcOptions());
           }
@@ -287,6 +315,7 @@ var tui_default = Plugin.define({
           notify(message(error2), true);
         } finally {
           prompting = false;
+          promptRequest = undefined;
           refresh();
         }
       }
@@ -310,7 +339,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
         const action = await context.ui.dialog.select({
           title: status.host.name,
           options: [{
-            title: status.status === "connected" ? "\u8BBE\u4E3A\u5F53\u524D\u76EE\u6807" : "\u8FDE\u63A5 / \u8BBE\u4E3A\u5F53\u524D\u76EE\u6807",
+            title: "\u8FDE\u63A5",
             value: "connect"
           }, {
             title: "\u6D4B\u8BD5\u8FDE\u63A5",
@@ -532,6 +561,9 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             }, {
               title: "\u91CD\u7F6E\u4FE1\u4EFB\u6307\u7EB9",
               value: "forget-key"
+            }, {
+              title: "\u6E05\u9664 sudo \u51ED\u636E",
+              value: "forget-sudo"
             }]
           });
           if (action)
@@ -540,6 +572,17 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
             await editor(host);
           if (action === "test")
             await test(id);
+          if (action === "forget-sudo") {
+            const yes = await context.ui.dialog.confirm({
+              title: "\u6E05\u9664 sudo \u51ED\u636E",
+              message: "\u6E05\u9664\u6B64\u4E3B\u673A\u5728\u63D2\u4EF6\u4E2D\u7684 sudo \u5BC6\u7801\u7F13\u5B58\u53CA\u5DF2\u8BB0\u4F4F\u7684\u5BC6\u7801\uFF1B\u4E0B\u6B21\u9700\u8981\u5BC6\u7801\u65F6\u91CD\u65B0\u8BE2\u95EE\u3002"
+            });
+            if (yes)
+              await run(() => api.manage({
+                action,
+                hostId: id
+              }, rpcOptions()));
+          }
           if (action === "delete" || action === "forget-key") {
             const yes = await context.ui.dialog.confirm({
               title: action === "delete" ? "\u5220\u9664\u4E3B\u673A\u914D\u7F6E" : "\u91CD\u7F6E\u4FE1\u4EFB\u6307\u7EB9",
@@ -605,7 +648,6 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
                     return () => _c$() ? "\u25CF" : status.status === "connecting" ? "\u25CC" : "\u25CB";
                   })(), _el$0);
                   _$insert2(_el$9, () => status.host.name, null);
-                  _$insert2(_el$9, () => status.current && viewSession() === props.sessionID ? "  \u5F53\u524D" : "", null);
                   _$insert2(_el$1, (() => {
                     var _c$2 = _$memo2(() => !!(viewSession() === props.sessionID && status.directory));
                     return () => _c$2() ? `  ${status.directory === status.home ? "~" : status.directory}` : status.status === "connecting" ? "  \u8FDE\u63A5\u4E2D\u2026" : "  \u672A\u8FDE\u63A5";

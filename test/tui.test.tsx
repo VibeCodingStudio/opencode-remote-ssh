@@ -50,6 +50,36 @@ test("SSH configuration restores the host and its last action when returning fro
   expect(menus.filter(menu => menu.title === "fixture").at(-1)?.current).toBe("edit");
 });
 
+test("sudo credential dialog reuses SSH only after selection and sends no password back to the model", async () => {
+  const replied = Promise.withResolvers<Record<string, unknown>>();
+  let pending = true;
+  const choices: string[] = [];
+  const context = {
+    location: { directory: "/fixture" },
+    client: { rpc: () => ({
+      state: async () => ({ hosts: [], requests: pending ? [{ id: "request", hostId: "host", hostName: "fixture", kind: "sudo", sessionId: "s", canReuseSSH: true }] : [] }),
+      events: { on: () => () => {} },
+      credential: async (input: Record<string, unknown>) => { pending = false; replied.resolve(input); },
+    }) },
+    keymap: { layer: () => {} },
+    data: { session: { permission: { list: () => [] } } },
+    ui: {
+      router: { current: () => ({ type: "home" }) }, slot: () => () => {},
+      dialog: {
+        select: async (input: { options: { value: string }[] }) => { choices.push(...input.options.map(option => option.value)); return "ssh"; },
+        confirm: async () => false, clear: () => {},
+      },
+      toast: { show: () => {} },
+    },
+  } as unknown as Plugin.Context;
+  const cleanup = await plugin.setup(context);
+  try {
+    const reply = await replied.promise;
+    expect(choices).toEqual(["ssh", "manual"]);
+    expect(reply).toEqual({ requestId: "request", value: undefined, reuseSSH: true, remember: false });
+  } finally { await cleanup?.(); }
+});
+
 test("password entry masks typing/paste, handles grapheme backspace, and returns only through submit", async () => {
   const [dialog, setDialog] = createSignal<(() => JSX.Element) | undefined>();
   const context = {
@@ -79,11 +109,11 @@ test("password entry masks typing/paste, handles grapheme backspace, and returns
   } finally { ui.renderer.destroy(); }
 });
 
-test("sidebar displays the current host/directory and mouse opens exactly the agreed actions", async () => {
+test("sidebar displays host directories without a current target and opens connection actions", async () => {
   let renderSlot: ((props: { sessionID: string }) => JSX.Element) | undefined;
   const menus: string[][] = [];
   let configured = false;
-  const state = { hosts: [{ host: { id: "host", name: "开发服务器" }, status: "connected", directory: "/home/dev/project", home: "/home/dev", current: true, changed: false }], requests: [] };
+  const state = { hosts: [{ host: { id: "host", name: "开发服务器" }, status: "connected", directory: "/home/dev/project", home: "/home/dev", changed: false }], requests: [] };
   const context = {
     location: { directory: "/fixture" },
     theme: { text: { base: "#ffffff", muted: "#aaaaaa", feedback: { error: { base: "#ff0000" } } } },
@@ -104,11 +134,11 @@ test("sidebar displays the current host/directory and mouse opens exactly the ag
     const frame = ui.captureCharFrame();
     expect(configured).toBe(true);
     expect(frame).toContain("/home/dev/project");
-    expect(frame).toContain("当前");
+    expect(frame).not.toContain("当前");
     const rows = frame.split("\n");
     const y = rows.findIndex(row => row.includes("开发服务器"));
     await ui.mockMouse.click(3, y);
     await ui.waitFor(() => menus.length > 0);
-    expect(menus[0]).toEqual(["设为当前目标", "测试连接", "断开连接"]);
+    expect(menus[0]).toEqual(["连接", "测试连接", "断开连接"]);
   } finally { await cleanup?.(); ui.renderer.destroy(); }
 });

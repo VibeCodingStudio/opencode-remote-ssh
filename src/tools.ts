@@ -11,14 +11,14 @@ import { shellResources, outsideDirectory } from "./authorization.ts";
 import { realpath } from "node:fs/promises";
 import nodePath from "node:path";
 
-const host = z.string().min(1).optional().describe("Saved host ID or unique name; defaults to the current session target");
+const hostId = z.string().uuid().describe("Required host ID from ssh_list_hosts; every operation explicitly identifies its host");
 const remote = z.string().optional().describe("Remote path; relative to the session's directory on this host");
 const limit = (value: number, max: number) => z.number().int().min(1).max(max).default(value);
-const common = { host };
+const common = { hostId };
 export const schemas = {
   ssh_list_hosts: z.object({}).strict(),
   ssh_set_workspace: z.object({ ...common, path: remote }).strict(),
-  ssh_shell_exec: z.object({ ...common, command: z.string().min(1).refine(v => !v.includes("\0")), stdin: z.string().optional(), timeoutMs: z.number().int().min(0).max(2_147_483_647).default(120_000) }).strict(),
+  ssh_shell_exec: z.object({ ...common, command: z.string().min(1).refine(v => !v.includes("\0")), sudo: z.boolean().default(false).describe("Run the entire command as root via sudo; credentials are requested in the TUI, never include passwords in command or stdin"), stdin: z.string().optional(), timeoutMs: z.number().int().min(0).max(2_147_483_647).default(120_000) }).strict(),
   ssh_list_directory: z.object({ ...common, path: remote, limit: limit(500, 5000) }).strict(),
   ssh_read_file: z.object({ ...common, path: z.string().min(1), startLine: limit(1, 10_000_000), limit: limit(2000, 10_000) }).strict(),
   ssh_write_file: z.object({ ...common, path: z.string().min(1), content: z.string().max(4 * 1024 * 1024), overwrite: z.boolean().default(false) }).strict(),
@@ -35,9 +35,9 @@ export type ToolName = keyof typeof schemas;
 export const READ_ONLY = new Set<ToolName>(["ssh_list_hosts", "ssh_set_workspace", "ssh_list_directory", "ssh_read_file", "ssh_grep", "ssh_glob"]);
 export function readonlyAgent(agent: string) { return agent.toLowerCase() === "plan" || agent.toLowerCase() === "explore"; }
 const descriptions: Record<ToolName, string> = {
-  ssh_list_hosts: "列出已保存 SSH 主机和本会话连接/目标/目录，不返回凭据。List configured hosts and the session's current remote target.",
-  ssh_set_workspace: "选择远程主机及工作目录。新连接从 ~ 开始；校验成功后更新本会话目标及侧栏。可显式重连已主动断开的主机。",
-  ssh_shell_exec: "在远程工作目录执行命令，返回 stdout/stderr/exitCode。默认超时120秒，0禁用超时。临时cd不改变工作目标。断线结果未知时不得自动重放。",
+  ssh_list_hosts: "列出已保存 SSH 主机及 ID、本会话中每台主机的连接状态和工作目录，不返回凭据。其他 ssh_* 工具必须显式传入 hostId；不存在当前目标。",
+  ssh_set_workspace: "修改指定 hostId 在本会话中的远程工作目录。新连接从 ~ 开始；校验成功后更新该主机的目录及侧栏，不影响其他主机。可显式重连已主动断开的主机。",
+  ssh_shell_exec: "在指定 hostId 的远程工作目录执行命令，返回 stdout/stderr/exitCode。sudo:true 将整个命令以 root 执行，密码通过 TUI 获取；不得把密码放进 command/stdin。默认超时120秒，0禁用超时。临时cd不改变持久工作目录。断线结果未知时不得自动重放。",
   ssh_list_directory: "列出远程目录。省略path使用当前工作目录，返回截断标记。Requires SFTP.",
   ssh_read_file: "按行读取远程文本文件。二进制文件使用ssh_download_file，输出有界。Requires SFTP.",
   ssh_write_file: "写入远程文本文件。覆盖须overwrite:true，父目录必须存在。先上传临时文件再发布。Requires SFTP.",
@@ -48,7 +48,7 @@ const descriptions: Record<ToolName, string> = {
   ssh_move: "移动/重命名远程路径；destination是精确目标路径，已存在时需要overwrite:true。Requires SFTP.",
   ssh_upload_file: "流式上传单个本地文件（包括二进制）到远程精确路径。localPath相对本地会话目录，remotePath相对远程工作目录。覆盖须overwrite:true。Requires SFTP.",
   ssh_download_file: "流式下载单个远程文件到本地精确路径。remotePath相对远程工作目录，localPath相对本地会话目录。覆盖须overwrite:true。Requires SFTP.",
-  ssh_reset_connection: "只重建本会话的异常SSH连接，保留并校验工作目录。不能保证杀死远端进程，不重放命令；主动断开的主机用ssh_set_workspace重连。",
+  ssh_reset_connection: "只重建指定 hostId 在本会话中的异常SSH连接，保留并校验该主机的工作目录。不能保证杀死远端进程，不重放命令；主动断开的主机用ssh_set_workspace重连。",
 };
 export async function initializeSession(ctx: Plugin.Context, runtime: RemoteRuntime, sessionId: string) {
   const session = await ctx.session.get({ sessionID: sessionId });
@@ -78,19 +78,19 @@ export async function registerTools(ctx: Plugin.Context, runtime: RemoteRuntime)
         if (name === "ssh_list_hosts") {
           await assert("read", ["ssh://hosts"]);
           const state = runtime.state(call.sessionID);
-          return content({ ok: true, target: state.target, hosts: state.hosts.map(({ host, ...status }) => ({ id: host.id, name: host.name, hostname: host.hostname, port: host.port, username: host.username, auth: host.auth, jumpHostId: host.jumpHostId, ...status })) });
+          return content({ ok: true, hosts: state.hosts.map(({ host, ...status }) => ({ id: host.id, name: host.name, hostname: host.hostname, port: host.port, username: host.username, auth: host.auth, jumpHostId: host.jumpHostId, ...status })) });
         }
         if (name === "ssh_reset_connection") {
           let selected;
-          try { selected = runtime.resolve(call.sessionID, args.host); } catch (error) { return content(failure(error)); }
+          try { selected = runtime.resolve(call.sessionID, args.hostId); } catch (error) { return content(failure(error)); }
           await assert("edit", [`ssh://${selected.host.id}/`]);
           try { return content({ ok: true, ...await runtime.reset(call.sessionID, selected.host.id, call.signal) }); }
           catch (error) { return content(failure(error)); }
         }
         let prepared;
         try {
-          const selected = runtime.resolve(call.sessionID, args.host);
-          // Capture the target before any asynchronous permission/connection work.
+          const selected = runtime.resolve(call.sessionID, args.hostId);
+          // Capture this host's directory before asynchronous permission/connection work.
           const connection = await runtime.connection(call.sessionID, selected.host.id, name === "ssh_set_workspace", call.signal);
           const directory = selected.directory ?? connection.home;
           const resolve = (value?: string) => remotePath(value, directory, connection.home);
@@ -110,7 +110,10 @@ export async function registerTools(ctx: Plugin.Context, runtime: RemoteRuntime)
         // Permission rejections deliberately propagate unchanged through OpenCode.
         switch (name) {
           case "ssh_set_workspace": case "ssh_list_directory": case "ssh_read_file": case "ssh_grep": case "ssh_glob": await read(path); break;
-          case "ssh_shell_exec": await assert("shell", shellResources(args.command)); break;
+          case "ssh_shell_exec":
+            await assert("shell", shellResources(args.command));
+            if (args.sudo) await assert("shell", [`sudo -u root -- sh -c ${quote(args.command)}`]);
+            break;
           case "ssh_move": await edit(resolve(args.source)); await edit(resolve(args.destination)); break;
           case "ssh_upload_file": await local("read", args.localPath); await edit(resolve(args.remotePath)); break;
           case "ssh_download_file": await read(resolve(args.remotePath)); await local("edit", args.localPath); break;
@@ -122,7 +125,9 @@ export async function registerTools(ctx: Plugin.Context, runtime: RemoteRuntime)
           switch (name) {
             case "ssh_set_workspace": result = await runtime.setWorkspace(call.sessionID, host.id, path, publisher(ctx, call.sessionID), call.signal); break;
             case "ssh_shell_exec": {
-              const output = await connection.exec(`cd -- ${quote(directory)} || exit $?\n${args.command}`, { signal: call.signal, stdin: args.stdin, timeoutMs: args.timeoutMs });
+              const command = `cd -- ${quote(directory)} || exit $?\n${args.command}`;
+              const options = { signal: call.signal, stdin: args.stdin, timeoutMs: args.timeoutMs };
+              const output = args.sudo ? await runtime.execSudo(call.sessionID, connection, command, options) : await connection.exec(command, options);
               return content({ ok: output.exitCode === 0 && output.outcome === "exited" && !output.timedOut && !output.cancelled, hostId: host.id, directory, ...output });
             }
             case "ssh_list_directory": result = await files.listDirectory(connection, path, args.limit, call.signal); break;

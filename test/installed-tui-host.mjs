@@ -42,7 +42,7 @@ const context = {
   location: { directory: process.cwd() },
   theme: { text: { base: "#ffffff", muted: "#aaaaaa", feedback: { error: { base: "#ff0000" } } } },
   client: { rpc: () => ({
-    state: async () => ({ hosts: [{ host: { id: "host", name: "开发服务器" }, status: "connected", directory: "/home/dev/project", home: "/home/dev", current: true, changed: false }], requests: [] }),
+    state: async () => ({ hosts: [{ host: { id: "host", name: "开发服务器" }, status: "connected", directory: "/home/dev/project", home: "/home/dev", changed: false }], requests: [] }),
     events: { on: () => () => {} },
   }) },
   keymap: { layer: factory => {
@@ -69,10 +69,10 @@ try {
   const frame = await ui.waitForFrame(value => value.includes("开发服务器"));
   assert.equal(hasCommand, true);
   assert.ok(frame.includes("/home/dev/project"));
-  assert.ok(frame.includes("当前"));
+  assert.ok(!frame.includes("当前"));
   const row = frame.split("\n").findIndex(value => value.includes("开发服务器"));
   await ui.mockMouse.click(3, row);
   await ui.waitFor(() => menus.length > 0);
-  assert.deepEqual(menus[0], ["设为当前目标", "测试连接", "断开连接"]);
+  assert.deepEqual(menus[0], ["连接", "测试连接", "断开连接"]);
   console.log("Installed TUI entrypoint loaded, rendered, and handled a host click without React.");
 } finally { await cleanup?.(); ui?.renderer.destroy(); layers.forEach(dispose => dispose()); disposeHost?.(); }

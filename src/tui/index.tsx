@@ -16,6 +16,7 @@ export default Plugin.define({
       const [viewSession, setViewSession] = createSignal<string>();
       const [loadError, setLoadError] = createSignal<string>();
       let requestSequence = 0, disposed = false, editing = false, prompting = false;
+      let promptRequest: string | undefined;
       const activeSession = () => { const route = context.ui.router.current(); return route.type === "session" ? route.sessionID : undefined; };
       const message = errorText;
       const notify = (text: string, error = false) => context.ui.toast.show({ title: "Remote SSH", message: text, variant: error ? "error" : "success" });
@@ -25,6 +26,7 @@ export default Plugin.define({
           const state = await api.state({ sessionId }, rpcOptions()) as StateView;
           if (disposed || sequence !== requestSequence) return;
           setView(state); setViewSession(sessionId); setLoadError(undefined);
+          if (prompting && promptRequest && !state.requests.some(request => request.id === promptRequest)) context.ui.dialog.clear();
           void promptCredentials();
         } catch (error) { if (!disposed && sequence === requestSequence) setLoadError(message(error)); }
       };
@@ -38,17 +40,28 @@ export default Plugin.define({
         if (!request) return;
         if (context.data.session.permission.list(request.sessionId)?.length) return;
         prompting = true;
+        promptRequest = request.id;
         try {
-          const value = await passwordDialog(context, `${request.hostName} · ${request.kind === "password" ? "SSH 密码" : "私钥口令"}`);
-          if (value === undefined) { await api.credential({ requestId: request.id, remember: false }, rpcOptions()); return; }
+          let reuseSSH = false;
+          if (request.kind === "sudo" && request.canReuseSSH) {
+            const source = await context.ui.dialog.select({ title: `${request.hostName} · sudo 密码`, options: [
+              { title: "使用此主机的 SSH 密码", value: "ssh" },
+              { title: "输入独立的 sudo 密码", value: "manual" },
+            ] });
+            if (!source) { await api.credential({ requestId: request.id, remember: false }, rpcOptions()); return; }
+            reuseSSH = source === "ssh";
+          }
+          const label = request.kind === "sudo" ? `sudo 密码${request.retry ? "（上次认证失败）" : ""}` : request.kind === "password" ? "SSH 密码" : "私钥口令";
+          const value = reuseSSH ? undefined : await passwordDialog(context, `${request.hostName} · ${label}`);
+          if (value === undefined && !reuseSSH) { await api.credential({ requestId: request.id, remember: false }, rpcOptions()); return; }
           const remember = await context.ui.dialog.confirm({ title: "记住凭据？", message: "保存在本机系统凭据存储中；选择不记住时只保留在后台服务进程内。", label: { confirm: "记住", cancel: "仅本次运行" } });
-          try { await api.credential({ requestId: request.id, value, remember: remember === true }, rpcOptions()); }
+          try { await api.credential({ requestId: request.id, value, reuseSSH, remember: remember === true }, rpcOptions()); }
           catch (error) {
             const temporary = await context.ui.dialog.confirm({ title: "凭据保存失败", message: `${message(error)}\n是否仅本次运行使用？`, label: { confirm: "仅本次", cancel: "取消" } });
-            await api.credential({ requestId: request.id, value: temporary ? value : undefined, remember: false }, rpcOptions());
+            await api.credential({ requestId: request.id, value: temporary ? value : undefined, reuseSSH: temporary === true && reuseSSH, remember: false }, rpcOptions());
           }
         } catch (error) { notify(message(error), true); }
-        finally { prompting = false; void refresh(); }
+        finally { prompting = false; promptRequest = undefined; void refresh(); }
       }
       const test = (hostId: string) => run(async () => {
         notify("正在测试 SSH 和 SFTP…");
@@ -58,7 +71,7 @@ export default Plugin.define({
       async function hostMenu(status: HostStatus, sessionId: string) {
         if (prompting) return;
         const action = await context.ui.dialog.select({ title: status.host.name, options: [
-          { title: status.status === "connected" ? "设为当前目标" : "连接 / 设为当前目标", value: "connect" as const },
+          { title: "连接", value: "connect" as const },
           { title: "测试连接", value: "test" as const },
           { title: "断开连接", value: "disconnect" as const },
         ] });
@@ -139,10 +152,15 @@ export default Plugin.define({
           const action = await context.ui.dialog.select({ title: host.name, current: actions.get(id), options: [
             { title: "编辑配置", value: "edit" }, { title: "测试连接", value: "test" },
             { title: "删除配置", value: "delete" }, { title: "重置信任指纹", value: "forget-key" },
+            { title: "清除 sudo 凭据", value: "forget-sudo" },
           ] });
           if (action) actions.set(id, action);
           if (action === "edit") await editor(host);
           if (action === "test") await test(id);
+          if (action === "forget-sudo") {
+            const yes = await context.ui.dialog.confirm({ title: "清除 sudo 凭据", message: "清除此主机在插件中的 sudo 密码缓存及已记住的密码；下次需要密码时重新询问。" });
+            if (yes) await run(() => api.manage({ action, hostId: id }, rpcOptions()));
+          }
           if (action === "delete" || action === "forget-key") {
             const yes = await context.ui.dialog.confirm({ title: action === "delete" ? "删除主机配置" : "重置信任指纹", message: action === "delete" ? `删除“${host.name}”？` : `重置后，下次连接会重新记录 ${host.hostname}:${host.port} 的服务器指纹。` });
             if (yes) await run(() => api.manage({ action, hostId: id }, rpcOptions()));
@@ -156,7 +174,7 @@ export default Plugin.define({
         <Show when={view().hosts.length} fallback={<text fg={context.theme.text.muted}>使用 /ssh 添加主机</text>}>
           <For each={view().hosts}>{status => <box flexDirection="column" onMouseUp={() => { void run(() => hostMenu(status, props.sessionID)); }}>
             <text fg={status.status === "error" ? context.theme.text.feedback.error.base : context.theme.text.base}>
-              {status.status === "connected" ? "●" : status.status === "connecting" ? "◌" : "○"} {status.host.name}{status.current && viewSession() === props.sessionID ? "  当前" : ""}
+              {status.status === "connected" ? "●" : status.status === "connecting" ? "◌" : "○"} {status.host.name}
             </text>
             <text fg={context.theme.text.muted}>
               {viewSession() === props.sessionID && status.directory ? `  ${status.directory === status.home ? "~" : status.directory}` : status.status === "connecting" ? "  连接中…" : "  未连接"}
