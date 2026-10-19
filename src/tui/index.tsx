@@ -179,7 +179,7 @@ export default Plugin.define({
     // A detached createRoot would override that fallback with an empty context.
     try {
       context.keymap.layer(() => ({ mode: "global", commands: [{
-        id: "remote-ssh.configure", title: "管理 SSH 主机", group: "Remote SSH", palette: true,
+        id: "remote-ssh.configure", title: "Manage SSH hosts", group: "Remote SSH", palette: true,
         slash: { name: "ssh" }, run: controls.configure,
       }] }));
     } catch (error) { controls.dispose(); throw error; }

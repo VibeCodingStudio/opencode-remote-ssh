@@ -82,7 +82,7 @@ function checkFrame() {
   if (phase === "startup" && pluginReady && /Ask anything|ctrl\+p commands/.test(plain)) {
     phase = "ready";
     setTimeout(() => { if (!done && !exited) { phase = "autocomplete"; terminal.write("/ssh"); } }, 500);
-  } else if (phase === "autocomplete" && /管理\s*SSH\s*主机/.test(plain)) {
+  } else if (phase === "autocomplete" && /Manage\s+SSH\s+hosts/.test(plain)) {
     phase = "configuration"; terminal.write("\r");
   } else if (phase === "configuration" && /SSH\s*主机配置/.test(plain) && /添加主机/.test(plain)) {
     phase = "editor"; terminal.write("\r");

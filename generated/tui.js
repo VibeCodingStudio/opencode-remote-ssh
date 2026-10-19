@@ -678,7 +678,7 @@ SFTP\uFF1A${result.sftp ? "\u53EF\u7528" : "\u4E0D\u53EF\u7528"}
         mode: "global",
         commands: [{
           id: "remote-ssh.configure",
-          title: "\u7BA1\u7406 SSH \u4E3B\u673A",
+          title: "Manage SSH hosts",
           group: "Remote SSH",
           palette: true,
           slash: {
